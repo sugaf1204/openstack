@@ -38,6 +38,7 @@ pub mod identity;
 pub mod image;
 pub mod load_balancer;
 pub mod network;
+mod project_scope;
 pub mod project_select_popup;
 pub mod region_select_popup;
 pub mod resource_behaviour;

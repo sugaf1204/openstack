@@ -525,6 +525,87 @@ impl AsyncOpenStack {
         Ok(())
     }
 
+    async fn authenticate_with_auth_helper<A>(
+        &self,
+        requested_scope: &AuthTokenScope,
+        auth_type: AuthType,
+        auth_helper: &A,
+    ) -> Result<(), OpenStackError>
+    where
+        A: AuthHelper + Sync + Send + 'static,
+    {
+        trace!("No Auth already available. Proceeding with new login");
+
+        let auth_type = auth_type.as_str();
+        if let Some(authenticator) = inventory::iter::<AuthPluginRegistration>
+            .into_iter()
+            .find(|x| x.method.get_supported_auth_methods().contains(&auth_type))
+            .map(|x| x.method)
+        {
+            let auth_hints = self
+                .config
+                .auth_methods
+                .as_ref()
+                .map(|methods| serde_json::json!({"auth_methods": methods}));
+            match authenticator
+                .auth(
+                    &self.client,
+                    self.get_service_endpoint(
+                        &ServiceType::Identity,
+                        Some(&ApiVersion::from(authenticator.api_version())),
+                    )
+                    .await?
+                    .url(),
+                    &gather_auth_data(
+                        &authenticator.requirements(auth_hints.as_ref())?,
+                        &self.config,
+                        auth_helper,
+                    )
+                    .await?,
+                    Some(requested_scope),
+                    auth_hints.as_ref(),
+                )
+                .await
+            {
+                Ok(token_auth) => {
+                    self.set_auth(token_auth.clone(), false)?;
+                }
+                Err(AuthError::AuthReceipt(receipt)) => {
+                    let auth_hints = serde_json::to_value(&receipt)?;
+                    let token_auth = token_receipt::PLUGIN
+                        .auth(
+                            &self.client,
+                            self.get_service_endpoint(
+                                &ServiceType::Identity,
+                                Some(&ApiVersion::from(authenticator.api_version())),
+                            )
+                            .await?
+                            .url(),
+                            &gather_auth_data(
+                                &token_receipt::PLUGIN.requirements(Some(&auth_hints))?,
+                                &self.config,
+                                auth_helper,
+                            )
+                            .await?,
+                            Some(requested_scope),
+                            Some(&auth_hints),
+                        )
+                        .await?;
+                    self.set_auth(token_auth.clone(), false)?;
+                }
+                Err(other) => {
+                    return Err(other.into());
+                }
+            }
+        } else {
+            return Err(AuthTokenError::IdentityMethod {
+                auth_type: auth_type.into(),
+            })?;
+        }
+
+        Ok(())
+    }
+
     /// Disable authentication caching for this session.
     ///
     /// Clears any cached tokens and prevents further caching — both the
@@ -574,84 +655,27 @@ impl AsyncOpenStack {
                 // State contain valid authentication for different scope/unscoped. It is possible
                 // to request new authz using this other auth
                 trace!("Valid Auth is available for reauthz: {:?}", available_auth);
-                let token_auth = self.reauth(&available_auth, &requested_scope).await?;
-                self.set_auth(token_auth.clone(), false)?;
+                match self.reauth(&available_auth, &requested_scope).await {
+                    Ok(token_auth) => {
+                        self.set_auth(token_auth.clone(), false)?;
+                    }
+                    Err(err) => {
+                        warn!(
+                            "Token reauth failed; falling back to full authentication: {:?}",
+                            err
+                        );
+                        self.authenticate_with_auth_helper(
+                            &requested_scope,
+                            auth_type,
+                            auth_helper,
+                        )
+                        .await?;
+                    }
+                }
             } else {
                 // No auth/authz information available or force_new_auth. Proceed with new auth
-                trace!("No Auth already available. Proceeding with new login");
-
-                let auth_type = auth_type.as_str();
-                // Find authenticator supporting the auth_type
-                if let Some(authenticator) = inventory::iter::<AuthPluginRegistration>
-                    .into_iter()
-                    .find(|x| x.method.get_supported_auth_methods().contains(&auth_type))
-                    .map(|x| x.method)
-                {
-                    // authenticate
-                    let auth_hints = self
-                        .config
-                        .auth_methods
-                        .as_ref()
-                        .map(|methods| serde_json::json!({"auth_methods": methods}));
-                    match authenticator
-                        .auth(
-                            &self.client,
-                            self.get_service_endpoint(
-                                &ServiceType::Identity,
-                                Some(&ApiVersion::from(authenticator.api_version())),
-                            )
-                            .await?
-                            .url(),
-                            &gather_auth_data(
-                                &authenticator.requirements(auth_hints.as_ref())?,
-                                &self.config,
-                                auth_helper,
-                            )
-                            .await?,
-                            Some(&requested_scope),
-                            auth_hints.as_ref(),
-                        )
-                        .await
-                    {
-                        Ok(token_auth) => {
-                            self.set_auth(token_auth.clone(), false)?;
-                        }
-                        Err(AuthError::AuthReceipt(receipt)) => {
-                            // Auth Receipt is received
-                            // Find the receipt auth plugin
-                            // Convert the receipt into auth hints
-                            let auth_hints = serde_json::to_value(&receipt)?;
-                            // Authenticate
-                            let token_auth = token_receipt::PLUGIN
-                                .auth(
-                                    &self.client,
-                                    self.get_service_endpoint(
-                                        &ServiceType::Identity,
-                                        Some(&ApiVersion::from(authenticator.api_version())),
-                                    )
-                                    .await?
-                                    .url(),
-                                    &gather_auth_data(
-                                        &token_receipt::PLUGIN.requirements(Some(&auth_hints))?,
-                                        &self.config,
-                                        auth_helper,
-                                    )
-                                    .await?,
-                                    Some(&requested_scope),
-                                    Some(&auth_hints),
-                                )
-                                .await?;
-                            self.set_auth(token_auth.clone(), false)?;
-                        }
-                        Err(other) => {
-                            return Err(other.into());
-                        }
-                    }
-                } else {
-                    return Err(AuthTokenError::IdentityMethod {
-                        auth_type: auth_type.into(),
-                    })?;
-                }
+                self.authenticate_with_auth_helper(&requested_scope, auth_type, auth_helper)
+                    .await?;
             }
         }
 
@@ -685,7 +709,7 @@ impl AsyncOpenStack {
                     .auth_info
                     .as_ref()
                     .map(AuthTokenScope::from)
-                    .is_some_and(|scope| requested_scope == scope)
+                    .is_some_and(|scope| requested_scope.matches(&scope))
             {
                 // And now time to rescope the token
                 let token_auth = self.reauth(token_auth, &requested_scope).await?;
@@ -1169,6 +1193,9 @@ mod tests {
         let config = CloudConfig {
             auth: Some(ConfigAuth {
                 auth_url: Some(base_url.as_str().to_string()),
+                username: Some("test-user".into()),
+                user_domain_name: Some("Default".into()),
+                password: Some("test-password".into()),
                 project_id: Some("test-project".into()),
                 ..Default::default()
             }),
@@ -1194,10 +1221,11 @@ mod tests {
             },
         };
 
-        let auth = Auth::AuthToken(Box::new(openstack_sdk_auth_core::AuthToken {
+        let token_auth = openstack_sdk_auth_core::AuthToken {
             token: SecretString::from(token),
             auth_info: Some(token_info),
-        }));
+        };
+        let auth = Auth::AuthToken(Box::new(token_auth.clone()));
 
         let mut catalog = Catalog::default();
         catalog
@@ -1211,6 +1239,14 @@ mod tests {
 
         let mut state = session::state::State::new();
         state.set_auth_hash_key(0);
+        state.set_scope_auth(
+            &AuthTokenScope::Project(Project {
+                id: Some("test-project".into()),
+                name: Some("TestProject".into()),
+                domain: None,
+            }),
+            &token_auth,
+        );
 
         AsyncOpenStack {
             client: reqwest::Client::builder()
@@ -1318,6 +1354,112 @@ mod tests {
         mock_401.assert_async().await;
         mock_reauth.assert_async().await;
         mock_200.assert_async().await;
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn test_authorize_falls_back_to_full_auth_when_token_reauth_fails() {
+        let server = MockServer::start_async().await;
+        let target_scope = AuthTokenScope::Project(Project {
+            id: Some("target-project".into()),
+            name: None,
+            domain: None,
+        });
+
+        let mock_reauth = server
+            .mock_async(|when, then| {
+                when.method(httpmock::Method::POST)
+                    .path("/auth/tokens")
+                    .json_body(json!({
+                        "auth": {
+                            "identity": {
+                                "methods": ["token"],
+                                "token": {
+                                    "id": "old-token"
+                                }
+                            },
+                            "scope": {
+                                "project": {
+                                    "id": "target-project"
+                                }
+                            }
+                        }
+                    }));
+                then.status(StatusCode::UNAUTHORIZED).json_body(json!({
+                    "error": {
+                        "code": 401,
+                        "message": "identity service error",
+                        "title": "Unauthorized"
+                    }
+                }));
+            })
+            .await;
+
+        let expires = (Utc::now() + chrono::TimeDelta::hours(1)).to_rfc3339();
+        let mock_full_auth = server
+            .mock_async(|when, then| {
+                when.method(httpmock::Method::POST)
+                    .path("/auth/tokens")
+                    .json_body(json!({
+                        "auth": {
+                            "identity": {
+                                "methods": ["password"],
+                                "password": {
+                                    "user": {
+                                        "domain": {
+                                            "name": "Default"
+                                        },
+                                        "name": "test-user",
+                                        "password": "test-password"
+                                    }
+                                }
+                            },
+                            "scope": {
+                                "project": {
+                                    "id": "target-project"
+                                }
+                            }
+                        }
+                    }));
+                then.status(StatusCode::CREATED)
+                    .header("x-subject-token", "new-token")
+                    .json_body(json!({
+                        "token": {
+                            "id": "token-id",
+                            "expires_at": &expires,
+                            "project": {
+                                "id": "target-project",
+                                "name": "TargetProject"
+                            },
+                            "user": {
+                                "id": "test-user",
+                                "name": "test-user"
+                            }
+                        }
+                    }));
+            })
+            .await;
+
+        let client = create_test_client(&server, "old-token", 1, None);
+
+        let result = client
+            .authorize_with_auth_helper(
+                Some(target_scope),
+                &crate::auth::auth_helper::Noop::default(),
+                false,
+            )
+            .await;
+
+        assert!(result.is_ok(), "expected Ok, got {:?}", result);
+        assert_eq!(client.get_auth_token().unwrap().expose_secret(), "new-token");
+        assert_eq!(
+            client
+                .get_auth_info()
+                .and_then(|auth| auth.token.project)
+                .and_then(|project| project.id),
+            Some("target-project".into())
+        );
+        mock_reauth.assert_async().await;
+        mock_full_auth.assert_async().await;
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

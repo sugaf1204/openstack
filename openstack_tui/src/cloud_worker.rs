@@ -125,7 +125,9 @@ impl Cloud {
         match self.cloud {
             Some(ref mut session) => {
                 debug!("Switching connection scope to {:?}", scope);
-                session.authorize(Some(scope.clone()), true, false).await?;
+                session
+                    .authorize_with_auth_helper(Some(scope.clone()), &self.auth_helper, false)
+                    .await?;
                 debug!("Authed as {:?}", session.get_auth_info());
 
                 session
