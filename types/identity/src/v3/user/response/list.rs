@@ -38,6 +38,7 @@ pub struct UserResponse {
 
     /// If the user is enabled, this value is `true`. If the user is disabled,
     /// this value is `false`.
+    #[serde(default)]
     #[structable(wide)]
     pub enabled: bool,
 
@@ -115,4 +116,21 @@ pub struct Options {
     pub multi_factor_auth_enabled: Option<bool>,
     #[serde(default)]
     pub multi_factor_auth_rules: Option<Vec<Vec<String>>>,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn user_response_defaults_missing_enabled_to_false() {
+        let user: UserResponse = serde_json::from_value(serde_json::json!({
+            "id": "user-id",
+            "name": "test-user",
+            "domain_id": "default"
+        }))
+        .unwrap();
+
+        assert!(!user.enabled);
+    }
 }

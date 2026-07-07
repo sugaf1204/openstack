@@ -21,9 +21,10 @@ use chrono::TimeDelta;
 use eyre::{Report, Result, eyre};
 use openstack_sdk::{
     AsyncOpenStack,
+    auth::authtoken::AuthTokenScope,
     auth::AuthState,
     auth::auth_helper::{AuthHelper, AuthHelperError},
-    config::ConfigFile,
+    config::{CloudConfig, ConfigFile},
     types::identity::v3::AuthResponse,
 };
 use secrecy::SecretString;
@@ -53,6 +54,7 @@ use crate::error::TuiError;
 pub(crate) struct Cloud {
     cloud_configs: ConfigFile,
     pub(crate) cloud: Option<AsyncOpenStack>,
+    cloud_name: Option<String>,
     auth_helper: TuiAuthHelper,
 }
 
@@ -77,8 +79,26 @@ impl Cloud {
         Ok(Self {
             cloud_configs: cfg,
             cloud: None,
+            cloud_name: None,
             auth_helper: TuiAuthHelper::new(auth_helper_control_tx),
         })
+    }
+
+    async fn connect_profile(
+        &self,
+        profile: &CloudConfig,
+        renew_auth: bool,
+    ) -> Result<AsyncOpenStack> {
+        let session = AsyncOpenStack::new_with_authentication_helper(
+            profile,
+            self.auth_helper.clone(),
+            renew_auth,
+        )
+        .await?;
+
+        discover_tui_service_endpoints(&session).await?;
+
+        Ok(session)
     }
 
     pub async fn connect_to_cloud(&mut self, cloud: String) -> Result<()> {
@@ -87,67 +107,43 @@ impl Cloud {
             .cloud_configs
             .get_cloud_config(cloud.clone())?
             .ok_or_else(|| eyre!("Cloud `{}` is not present in configuration files", cloud))?;
-        let session = AsyncOpenStack::new_with_authentication_helper(
-            &profile,
-            self.auth_helper.clone(),
-            false,
-        )
-        .await?;
-
-        session
-            .discover_service_endpoint(&openstack_sdk::types::ServiceType::Compute)
-            .await?;
-        session
-            .discover_service_endpoint(&openstack_sdk::types::ServiceType::BlockStorage)
-            .await?;
-        session
-            .discover_service_endpoint(&openstack_sdk::types::ServiceType::Dns)
-            .await?;
-        session
-            .discover_service_endpoint(&openstack_sdk::types::ServiceType::Image)
-            .await?;
-        session
-            .discover_service_endpoint(&openstack_sdk::types::ServiceType::LoadBalancer)
-            .await?;
-        session
-            .discover_service_endpoint(&openstack_sdk::types::ServiceType::Network)
-            .await?;
+        let session = self.connect_profile(&profile, false).await?;
 
         self.cloud = Some(session);
+        self.cloud_name = Some(cloud);
 
         Ok(())
     }
 
     pub async fn switch_auth_scope(
         &mut self,
-        scope: &openstack_sdk::auth::authtoken::AuthTokenScope,
+        scope: &AuthTokenScope,
     ) -> Result<Option<AuthResponse>, Report> {
-        match self.cloud {
-            Some(ref mut session) => {
-                debug!("Switching connection scope to {:?}", scope);
-                session
-                    .authorize_with_auth_helper(Some(scope.clone()), &self.auth_helper, false)
-                    .await?;
-                debug!("Authed as {:?}", session.get_auth_info());
-
-                session
-                    .discover_service_endpoint(&openstack_sdk::types::ServiceType::Compute)
-                    .await?;
-                session
-                    .discover_service_endpoint(&openstack_sdk::types::ServiceType::BlockStorage)
-                    .await?;
-                session
-                    .discover_service_endpoint(&openstack_sdk::types::ServiceType::Image)
-                    .await?;
-
-                session
-                    .discover_service_endpoint(&openstack_sdk::types::ServiceType::Network)
-                    .await?;
-
-                Ok(session.get_auth_info())
-            }
-            _ => Err(eyre!("Cannot change scope without being connected first")),
+        if self.cloud.is_none() {
+            return Err(eyre!("Cannot change scope without being connected first"));
         }
+        let cloud_name = self
+            .cloud_name
+            .clone()
+            .ok_or_else(|| eyre!("Cannot change scope without a selected cloud"))?;
+        let current_region = self.cloud.as_ref().and_then(AsyncOpenStack::get_region_name);
+        let profile = self
+            .cloud_configs
+            .get_cloud_config(cloud_name.clone())?
+            .ok_or_else(|| eyre!("Cloud `{}` is not present in configuration files", cloud_name))?;
+        let scoped_profile = profile_scoped_to(profile, scope);
+
+        debug!("Switching connection scope to {:?}", scope);
+        let session = self.connect_profile(&scoped_profile, true).await?;
+        if let Some(region) = current_region {
+            session.set_region_name(region)?;
+            discover_tui_service_endpoints(&session).await?;
+        }
+        debug!("Authed as {:?}", session.get_auth_info());
+
+        let auth_info = session.get_auth_info();
+        self.cloud = Some(session);
+        Ok(auth_info)
     }
 
     pub async fn run(
@@ -260,6 +256,57 @@ impl Cloud {
         }
         Ok(())
     }
+}
+
+async fn discover_tui_service_endpoints(session: &AsyncOpenStack) -> Result<()> {
+    for service_type in [
+        openstack_sdk::types::ServiceType::Compute,
+        openstack_sdk::types::ServiceType::BlockStorage,
+        openstack_sdk::types::ServiceType::Dns,
+        openstack_sdk::types::ServiceType::Image,
+        openstack_sdk::types::ServiceType::LoadBalancer,
+        openstack_sdk::types::ServiceType::Network,
+    ] {
+        session.discover_service_endpoint(&service_type).await?;
+    }
+    Ok(())
+}
+
+fn profile_scoped_to(mut profile: CloudConfig, scope: &AuthTokenScope) -> CloudConfig {
+    let auth = profile.auth.get_or_insert_with(Default::default);
+    auth.project_id = None;
+    auth.project_name = None;
+    auth.project_domain_id = None;
+    auth.project_domain_name = None;
+    auth.domain_id = None;
+    auth.domain_name = None;
+    auth.system_scope = None;
+
+    match scope {
+        AuthTokenScope::Project(project) => {
+            auth.project_id.clone_from(&project.id);
+            if project.id.is_none() {
+                auth.project_name.clone_from(&project.name);
+                if let Some(domain) = &project.domain {
+                    auth.project_domain_id.clone_from(&domain.id);
+                    auth.project_domain_name.clone_from(&domain.name);
+                }
+            }
+        }
+        AuthTokenScope::Domain(domain) => {
+            auth.domain_id.clone_from(&domain.id);
+            auth.domain_name.clone_from(&domain.name);
+        }
+        AuthTokenScope::System(system) => {
+            if system.all == Some(true) {
+                auth.system_scope = Some(String::from("all"));
+            }
+        }
+        AuthTokenScope::Unscoped => {}
+    }
+
+    profile.auth_cache = Some(false);
+    profile
 }
 
 #[derive(Clone)]
@@ -380,5 +427,76 @@ impl ExecuteApiRequest for ApiRequest {
             ApiRequest::LoadBalancer(data) => data.execute_request(session, request, app_tx).await,
             ApiRequest::Network(data) => data.execute_request(session, request, app_tx).await,
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use openstack_sdk::config::Auth;
+    use openstack_sdk::types::identity::v3::{Domain, Project};
+
+    fn profile_with_existing_scope() -> CloudConfig {
+        CloudConfig {
+            auth: Some(Auth {
+                project_id: Some(String::from("old-project-id")),
+                project_name: Some(String::from("old-project-name")),
+                project_domain_id: Some(String::from("old-domain-id")),
+                project_domain_name: Some(String::from("old-domain-name")),
+                domain_id: Some(String::from("old-domain-scope-id")),
+                domain_name: Some(String::from("old-domain-scope-name")),
+                system_scope: Some(String::from("all")),
+                ..Default::default()
+            }),
+            auth_cache: Some(true),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn profile_scoped_to_project_id_clears_other_scope_fields() {
+        let profile = profile_scoped_to(
+            profile_with_existing_scope(),
+            &AuthTokenScope::Project(Project {
+                id: Some(String::from("new-project-id")),
+                name: Some(String::from("new-project-name")),
+                domain: Some(Domain {
+                    id: Some(String::from("new-domain-id")),
+                    name: Some(String::from("new-domain-name")),
+                }),
+            }),
+        );
+        let auth = profile.auth.unwrap();
+
+        assert_eq!(auth.project_id.as_deref(), Some("new-project-id"));
+        assert_eq!(auth.project_name, None);
+        assert_eq!(auth.project_domain_id, None);
+        assert_eq!(auth.project_domain_name, None);
+        assert_eq!(auth.domain_id, None);
+        assert_eq!(auth.domain_name, None);
+        assert_eq!(auth.system_scope, None);
+        assert_eq!(profile.auth_cache, Some(false));
+    }
+
+    #[test]
+    fn profile_scoped_to_project_name_keeps_domain() {
+        let profile = profile_scoped_to(
+            profile_with_existing_scope(),
+            &AuthTokenScope::Project(Project {
+                id: None,
+                name: Some(String::from("new-project-name")),
+                domain: Some(Domain {
+                    id: Some(String::from("new-domain-id")),
+                    name: None,
+                }),
+            }),
+        );
+        let auth = profile.auth.unwrap();
+
+        assert_eq!(auth.project_id, None);
+        assert_eq!(auth.project_name.as_deref(), Some("new-project-name"));
+        assert_eq!(auth.project_domain_id.as_deref(), Some("new-domain-id"));
+        assert_eq!(auth.project_domain_name, None);
+        assert_eq!(profile.auth_cache, Some(false));
     }
 }
