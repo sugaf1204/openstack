@@ -23,6 +23,7 @@ use crate::{
     config::Config,
     error::TuiError,
     mode::Mode,
+    navigation_key::NavigationKey,
 };
 
 const BOTTOM_TITLE: &str = "(Esc) to close";
@@ -155,13 +156,15 @@ impl Component for ErrorPopup {
     }
 
     fn handle_key_events(&mut self, key: KeyEvent) -> Result<Option<Action>, TuiError> {
-        match key.code {
-            KeyCode::Down => self.scroll_down(),
-            KeyCode::Up => self.scroll_up(),
-            KeyCode::Right => self.scroll_right(),
-            KeyCode::Left => self.scroll_left(),
-            KeyCode::Char('r') => self.report()?,
-            _ => {}
+        if let Some(navigation_key) = NavigationKey::from_event(&key) {
+            match navigation_key {
+                NavigationKey::Down => self.scroll_down(),
+                NavigationKey::Up => self.scroll_up(),
+                NavigationKey::Right => self.scroll_right(),
+                NavigationKey::Left => self.scroll_left(),
+            }
+        } else if key.code == KeyCode::Char('r') {
+            self.report()?;
         }
         Ok(None)
     }
@@ -185,5 +188,41 @@ impl Component for ErrorPopup {
             .with_width_chars(120)
             .with_border_color(self.config.styles.popup_border_error_fg);
         popup.draw(frame, area)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crossterm::event::KeyModifiers;
+
+    fn key(code: KeyCode) -> KeyEvent {
+        KeyEvent::new(code, KeyModifiers::empty())
+    }
+
+    #[test]
+    fn vim_keys_scroll_error_content_in_all_directions() {
+        let mut popup = ErrorPopup::new();
+
+        popup.handle_key_events(key(KeyCode::Char('j'))).unwrap();
+        assert_eq!(popup.scroll, (0, 1));
+
+        popup.handle_key_events(key(KeyCode::Char('l'))).unwrap();
+        assert_eq!(popup.scroll, (1, 1));
+
+        popup.handle_key_events(key(KeyCode::Char('k'))).unwrap();
+        assert_eq!(popup.scroll, (1, 0));
+
+        popup.handle_key_events(key(KeyCode::Char('h'))).unwrap();
+        assert_eq!(popup.scroll, (0, 0));
+    }
+
+    #[test]
+    fn report_key_does_not_scroll_when_no_report_source_exists() {
+        let mut popup = ErrorPopup::new();
+
+        popup.handle_key_events(key(KeyCode::Char('r'))).unwrap();
+
+        assert_eq!(popup.scroll, (0, 0));
     }
 }
