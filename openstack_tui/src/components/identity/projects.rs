@@ -18,6 +18,7 @@ use crate::cloud_worker::identity::v3::{
 };
 use crate::cloud_worker::types::ApiRequest;
 use crate::components::generic_resource_view::GenericResourceView;
+use crate::components::project_scope::project_scope;
 use crate::components::resource_behaviour::ResourceBehaviour;
 use crate::mode::Mode;
 use openstack_types::identity::v3::project::response::list::ProjectResponse;
@@ -63,16 +64,8 @@ impl ResourceBehaviour for IdentityProjectsBehaviour {
         if let Action::SwitchToProject = action
             && let Some(sel) = selected
         {
-            let scope = openstack_sdk::types::identity::v3::Project {
-                id: sel.id.clone(),
-                name: sel.name.clone(),
-                domain: Some(openstack_sdk::types::identity::v3::Domain {
-                    id: sel.domain_id.clone(),
-                    name: None,
-                }),
-            };
             return vec![Action::CloudChangeScope(Box::new(
-                openstack_sdk::auth::authtoken::AuthTokenScope::Project(scope),
+                project_scope(sel.id.clone(), sel.name.clone(), sel.domain_id.clone(), None),
             ))];
         }
         Vec::new()
@@ -85,6 +78,7 @@ pub type IdentityProjects = GenericResourceView<'static, IdentityProjectsBehavio
 mod tests {
     use super::*;
     use crate::components::resource_behaviour::ResourceBehaviour;
+    use openstack_sdk::auth::authtoken::AuthTokenScope;
     use openstack_types::identity::v3::project::response::list::ProjectResponse;
 
     fn make_project(id: &str, name: &str, domain_id: &str) -> ProjectResponse {
@@ -142,7 +136,15 @@ mod tests {
             &IdentityProjectList::default(),
         );
         assert_eq!(actions.len(), 1);
-        assert!(matches!(actions[0], Action::CloudChangeScope(_)));
+        let Action::CloudChangeScope(scope) = &actions[0] else {
+            panic!("expected CloudChangeScope action");
+        };
+        let AuthTokenScope::Project(project) = scope.as_ref() else {
+            panic!("expected project scope");
+        };
+        assert_eq!(project.id.as_deref(), Some("proj-1"));
+        assert_eq!(project.name, None);
+        assert_eq!(project.domain, None);
     }
 
     #[test]

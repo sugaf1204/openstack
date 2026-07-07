@@ -26,7 +26,7 @@ use crate::{
         IdentityApiRequest, IdentityAuthProjectApiRequest, IdentityAuthProjectListBuilder,
     },
     cloud_worker::types::ApiRequest,
-    components::{Component, FuzzySelect, FuzzySelectState},
+    components::{Component, FuzzySelect, FuzzySelectState, project_scope::project_scope},
     config::Config,
     error::TuiError,
     mode::Mode,
@@ -117,15 +117,12 @@ impl Component for ProjectSelect {
             && let Some(selected_name) = self.popup_state.selected()
             && let Some(project) = self.items.iter().find(|p| &p.name == selected_name)
         {
-            let new_project = openstack_sdk::types::identity::v3::Project {
-                id: Some(project.id.clone()),
-                name: Some(project.name.clone()),
-                domain: Some(openstack_sdk::types::identity::v3::Domain {
-                    id: Some(project.domain_id.clone()),
-                    name: None,
-                }),
-            };
-            let new_scope = openstack_sdk::auth::authtoken::AuthTokenScope::Project(new_project);
+            let new_scope = project_scope(
+                Some(project.id.clone()),
+                Some(project.name.clone()),
+                Some(project.domain_id.clone()),
+                None,
+            );
             return Ok(Some(Action::CloudChangeScope(Box::new(new_scope))));
         }
         Ok(None)
