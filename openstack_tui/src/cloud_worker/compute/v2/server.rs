@@ -33,12 +33,14 @@ pub mod get;
 pub mod get_console_output;
 pub mod instance_action;
 pub mod list_detailed;
+pub mod remote_console;
 
 pub use delete::*;
 pub use get::*;
 pub use get_console_output::*;
 pub use instance_action::*;
 pub use list_detailed::*;
+pub use remote_console::*;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum ComputeServerApiRequest {
@@ -48,6 +50,8 @@ pub enum ComputeServerApiRequest {
     Get(Box<ComputeServerShow>),
     /// GetConsoleOutput
     GetConsoleOutput(Box<ComputeServerGetConsoleOutput>),
+    /// CreateRemoteConsole
+    CreateRemoteConsole(Box<ComputeServerCreateRemoteConsole>),
     /// InstanceAction
     InstanceAction(Box<ComputeServerInstanceActionApiRequest>),
     /// ListDetailed
@@ -66,6 +70,12 @@ impl From<ComputeServerGetConsoleOutput> for ComputeServerApiRequest {
     }
 }
 
+impl From<ComputeServerCreateRemoteConsole> for ComputeServerApiRequest {
+    fn from(item: ComputeServerCreateRemoteConsole) -> Self {
+        ComputeServerApiRequest::CreateRemoteConsole(Box::new(item))
+    }
+}
+
 impl From<ComputeServerInstanceActionApiRequest> for ComputeServerApiRequest {
     fn from(item: ComputeServerInstanceActionApiRequest) -> Self {
         ComputeServerApiRequest::InstanceAction(Box::new(item))
@@ -80,6 +90,12 @@ impl From<ComputeServerList> for ComputeServerApiRequest {
 
 impl From<ComputeServerGetConsoleOutput> for ComputeApiRequest {
     fn from(item: ComputeServerGetConsoleOutput) -> Self {
+        ComputeApiRequest::Server(Box::new(ComputeServerApiRequest::from(item)))
+    }
+}
+
+impl From<ComputeServerCreateRemoteConsole> for ComputeApiRequest {
+    fn from(item: ComputeServerCreateRemoteConsole) -> Self {
         ComputeApiRequest::Server(Box::new(ComputeServerApiRequest::from(item)))
     }
 }
@@ -111,6 +127,9 @@ impl ExecuteApiRequest for ComputeServerApiRequest {
                 req.execute_request(session, request, app_tx).await?;
             }
             ComputeServerApiRequest::GetConsoleOutput(req) => {
+                req.execute_request(session, request, app_tx).await?;
+            }
+            ComputeServerApiRequest::CreateRemoteConsole(req) => {
                 req.execute_request(session, request, app_tx).await?;
             }
             ComputeServerApiRequest::InstanceAction(req) => {

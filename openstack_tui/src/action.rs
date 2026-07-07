@@ -124,10 +124,19 @@ pub enum Action {
     DeleteComputeServer,
     /// Show console output of the selected entry
     ShowServerConsoleOutput,
+    /// Open noVNC console of the selected server
+    OpenServerNoVncConsole,
+    /// Open SSH to the selected server
+    OpenServerSsh,
     /// Show selected server instance actions
     ShowComputeServerInstanceActions,
     /// Show selected server instance action events
     ShowComputeServerInstanceActionEvents,
+
+    /// Open an external URL
+    OpenUrl { url: String },
+    /// Open an interactive SSH session
+    OpenSsh { host: String },
 
     // DNS (Designate)
     /// Set DNS Zone filters
