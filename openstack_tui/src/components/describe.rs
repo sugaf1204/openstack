@@ -26,7 +26,10 @@ use ratatui::{
 use serde_json::Value;
 use std::cmp;
 
-use crate::{action::Action, config::Config, error::TuiError, mode::Mode};
+use crate::{
+    action::Action, config::Config, error::TuiError, mode::Mode,
+    navigation_key::NavigationKey,
+};
 
 #[derive(Default)]
 pub struct Describe {
@@ -248,19 +251,24 @@ impl Describe {
 impl Component for Describe {
     fn handle_key_events(&mut self, key: KeyEvent) -> Result<Option<Action>, TuiError> {
         if key.kind == KeyEventKind::Press {
-            match key.code {
-                KeyCode::Char('j') | KeyCode::Down => self.cursor_down()?,
-                KeyCode::Char('k') | KeyCode::Up => self.cursor_up()?,
-                KeyCode::Home => self.cursor_first()?,
-                KeyCode::End => self.cursor_last()?,
-                KeyCode::PageUp => self.cursor_page_up()?,
-                KeyCode::PageDown => self.cursor_page_down()?,
-                KeyCode::Left => self.cursor_left()?,
-                KeyCode::Right => self.cursor_right()?,
-                // KeyCode::Char('w') => {
-                //     self.wrap = !self.wrap;
-                // }
-                _ => {}
+            if let Some(navigation_key) = NavigationKey::from_event(&key) {
+                match navigation_key {
+                    NavigationKey::Down => self.cursor_down()?,
+                    NavigationKey::Up => self.cursor_up()?,
+                    NavigationKey::Left => self.cursor_left()?,
+                    NavigationKey::Right => self.cursor_right()?,
+                }
+            } else {
+                match key.code {
+                    KeyCode::Home => self.cursor_first()?,
+                    KeyCode::End => self.cursor_last()?,
+                    KeyCode::PageUp => self.cursor_page_up()?,
+                    KeyCode::PageDown => self.cursor_page_down()?,
+                    // KeyCode::Char('w') => {
+                    //     self.wrap = !self.wrap;
+                    // }
+                    _ => {}
+                }
             }
         }
         Ok(None)
@@ -285,5 +293,44 @@ impl Component for Describe {
         Widget::render(Clear, area, f.buffer_mut());
         self.render_inner(area, f.buffer_mut());
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crossterm::event::KeyModifiers;
+
+    fn key(code: KeyCode) -> KeyEvent {
+        KeyEvent::new(code, KeyModifiers::empty())
+    }
+
+    #[test]
+    fn vim_keys_scroll_content_in_all_directions() {
+        let mut describe = Describe::new();
+        describe
+            .set_data(Value::String("abcdef\n012345\nuvwxyz".into()))
+            .unwrap();
+        describe.content_size = Size::new(3, 2);
+
+        describe
+            .handle_key_events(key(KeyCode::Char('j')))
+            .unwrap();
+        assert_eq!(describe.content_scroll, (1, 0));
+
+        describe
+            .handle_key_events(key(KeyCode::Char('l')))
+            .unwrap();
+        assert_eq!(describe.content_scroll, (1, 1));
+
+        describe
+            .handle_key_events(key(KeyCode::Char('k')))
+            .unwrap();
+        assert_eq!(describe.content_scroll, (0, 1));
+
+        describe
+            .handle_key_events(key(KeyCode::Char('h')))
+            .unwrap();
+        assert_eq!(describe.content_scroll, (0, 0));
     }
 }

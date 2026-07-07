@@ -27,6 +27,7 @@ use crate::{
     config::Config,
     error::TuiError,
     mode::Mode,
+    navigation_key::NavigationKey,
     utils::centered_rect_fixed,
     widgets::{
         button::Button,
@@ -73,11 +74,24 @@ impl Component for ConfirmPopup {
     }
 
     fn handle_key_events(&mut self, key: KeyEvent) -> Result<Option<Action>, TuiError> {
+        if let Some(navigation_key) = NavigationKey::from_event(&key) {
+            match navigation_key {
+                NavigationKey::Left => {
+                    self.button_group_state.select_previous();
+                }
+                NavigationKey::Right => {
+                    self.button_group_state.select_next();
+                }
+                NavigationKey::Up | NavigationKey::Down => {}
+            }
+            return Ok(None);
+        }
+
         match key.code {
-            KeyCode::Left | KeyCode::BackTab => {
+            KeyCode::BackTab => {
                 self.button_group_state.select_previous();
             }
-            KeyCode::Right | KeyCode::Tab => {
+            KeyCode::Tab => {
                 self.button_group_state.select_next();
             }
             KeyCode::Enter => {
@@ -144,5 +158,55 @@ impl Component for ConfirmPopup {
         );
 
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::cloud_worker::compute::v2::{ComputeFlavorApiRequest, ComputeFlavorList};
+    use crossterm::event::KeyModifiers;
+    use ratatui::{Terminal, backend::TestBackend};
+
+    fn key(code: KeyCode) -> KeyEvent {
+        KeyEvent::new(code, KeyModifiers::empty())
+    }
+
+    fn request() -> ApiRequest {
+        ApiRequest::from(ComputeFlavorApiRequest::from(ComputeFlavorList::default()))
+    }
+
+    fn rendered_popup() -> ConfirmPopup {
+        let mut popup = ConfirmPopup::new(&request());
+        let backend = TestBackend::new(80, 20);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal
+            .draw(|frame| popup.draw(frame, frame.area()).unwrap())
+            .unwrap();
+        popup
+    }
+
+    #[test]
+    fn horizontal_vim_keys_select_previous_and_next_buttons() {
+        let mut popup = rendered_popup();
+
+        assert_eq!(popup.button_group_state.selected(), Some(0));
+
+        popup.handle_key_events(key(KeyCode::Char('l'))).unwrap();
+        assert_eq!(popup.button_group_state.selected(), Some(1));
+
+        popup.handle_key_events(key(KeyCode::Char('h'))).unwrap();
+        assert_eq!(popup.button_group_state.selected(), Some(0));
+    }
+
+    #[test]
+    fn tab_keys_keep_selecting_previous_and_next_buttons() {
+        let mut popup = rendered_popup();
+
+        popup.handle_key_events(key(KeyCode::Tab)).unwrap();
+        assert_eq!(popup.button_group_state.selected(), Some(1));
+
+        popup.handle_key_events(key(KeyCode::BackTab)).unwrap();
+        assert_eq!(popup.button_group_state.selected(), Some(0));
     }
 }

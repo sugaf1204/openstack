@@ -22,6 +22,7 @@ pub mod components;
 pub mod config;
 pub(crate) mod error;
 pub(crate) mod mode;
+pub(crate) mod navigation_key;
 pub(crate) mod tui;
 pub mod utils;
 pub mod widgets;

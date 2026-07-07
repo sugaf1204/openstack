@@ -30,6 +30,7 @@ use crate::{
     config::{Config, ViewConfig},
     error::TuiError,
     mode::Mode,
+    navigation_key::NavigationKey,
     utils::ResourceKey,
 };
 
@@ -304,17 +305,22 @@ where
     }
 
     pub fn handle_key_events(&mut self, key: KeyEvent) -> Result<Option<Action>, TuiError> {
-        match key.code {
-            KeyCode::Down => self.cursor_down()?,
-            KeyCode::Up => self.cursor_up()?,
-            KeyCode::Home => self.cursor_first()?,
-            KeyCode::End => self.cursor_last()?,
-            KeyCode::PageUp => self.cursor_page_up()?,
-            KeyCode::PageDown => self.cursor_page_down()?,
-            KeyCode::Left => self.cursor_left()?,
-            KeyCode::Right => self.cursor_right()?,
-            KeyCode::Tab => self.key_tab()?,
-            _ => {}
+        if let Some(navigation_key) = NavigationKey::from_event(&key) {
+            match navigation_key {
+                NavigationKey::Down => self.cursor_down()?,
+                NavigationKey::Up => self.cursor_up()?,
+                NavigationKey::Left => self.cursor_left()?,
+                NavigationKey::Right => self.cursor_right()?,
+            }
+        } else {
+            match key.code {
+                KeyCode::Home => self.cursor_first()?,
+                KeyCode::End => self.cursor_last()?,
+                KeyCode::PageUp => self.cursor_page_up()?,
+                KeyCode::PageDown => self.cursor_page_down()?,
+                KeyCode::Tab => self.key_tab()?,
+                _ => {}
+            }
         }
         Ok(None)
     }
@@ -717,5 +723,85 @@ where
         self.sync_table_data()?;
         self.set_loading(false);
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crossterm::event::KeyModifiers;
+    use serde::Deserialize;
+    use serde_json::json;
+    use structable::StructTableOptions;
+
+    #[derive(Clone, Debug, Deserialize, StructTable)]
+    struct TestItem {
+        id: String,
+        name: String,
+    }
+
+    impl ResourceKey for TestItem {
+        fn get_key() -> &'static str {
+            "test.item"
+        }
+    }
+
+    fn key(code: KeyCode) -> KeyEvent {
+        KeyEvent::new(code, KeyModifiers::empty())
+    }
+
+    fn component_with_items() -> TableViewComponentBase<'static, TestItem, String> {
+        let mut component = TableViewComponentBase::new();
+        component
+            .set_data(vec![
+                json!({"id": "one", "name": "First"}),
+                json!({"id": "two", "name": "Second"}),
+                json!({"id": "three", "name": "Third"}),
+            ])
+            .unwrap();
+        component
+    }
+
+    #[test]
+    fn vertical_vim_keys_move_table_selection() {
+        let mut component = component_with_items();
+
+        assert_eq!(
+            component.get_selected().map(|item| item.id.as_str()),
+            Some("one")
+        );
+
+        component
+            .handle_key_events(key(KeyCode::Char('j')))
+            .unwrap();
+        assert_eq!(
+            component.get_selected().map(|item| item.id.as_str()),
+            Some("two")
+        );
+
+        component
+            .handle_key_events(key(KeyCode::Char('k')))
+            .unwrap();
+        assert_eq!(
+            component.get_selected().map(|item| item.id.as_str()),
+            Some("one")
+        );
+    }
+
+    #[test]
+    fn horizontal_vim_keys_are_accepted_in_table_focus() {
+        let mut component = component_with_items();
+
+        component
+            .handle_key_events(key(KeyCode::Char('l')))
+            .unwrap();
+        component
+            .handle_key_events(key(KeyCode::Char('h')))
+            .unwrap();
+
+        assert_eq!(
+            component.get_selected().map(|item| item.id.as_str()),
+            Some("one")
+        );
     }
 }
