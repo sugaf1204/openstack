@@ -21,10 +21,7 @@ use crate::cloud_worker::types::{ApiRequest, ComputeApiRequest};
 use crate::components::generic_resource_view::GenericResourceView;
 use crate::components::resource_behaviour::ResourceBehaviour;
 use crate::mode::Mode;
-use openstack_types::compute::v2::server::response::list_detailed_21::{
-    OsExtIpsType, ServerResponse,
-};
-use std::net::Ipv4Addr;
+use openstack_types::compute::v2::server::response::list_detailed_21::ServerResponse;
 
 /// Behaviour implementation for ComputeServers.
 pub struct ComputeServersBehaviour;
@@ -163,7 +160,6 @@ impl ResourceBehaviour for ComputeServersBehaviour {
         _filter: &Self::Filter,
     ) -> Vec<Action> {
         match action {
-            Action::OpenServerSsh => server_ssh_actions(selected),
             Action::ShowComputeServerInstanceActions => server_instance_action_actions(selected),
             _ => Vec::new(),
         }
@@ -181,39 +177,6 @@ fn remote_console_url(data: &serde_json::Value) -> Option<String> {
         .or_else(|| data.pointer("/remote_console/url"))
         .and_then(serde_json::Value::as_str)
         .map(String::from)
-}
-
-fn server_label(server: &ServerResponse) -> String {
-    server.name.clone().unwrap_or_else(|| server.id.clone())
-}
-
-fn fixed_ipv4_address(server: &ServerResponse) -> Option<String> {
-    server
-        .addresses
-        .iter()
-        .flat_map(|(_network, addresses)| addresses.iter())
-        .find(|address| {
-            matches!(&address.os_ext_ips_type, OsExtIpsType::Fixed)
-                && address.version == 4
-                && address.addr.parse::<Ipv4Addr>().is_ok()
-        })
-        .map(|address| address.addr.clone())
-}
-
-fn server_ssh_actions(selected: Option<&ServerResponse>) -> Vec<Action> {
-    let Some(server) = selected else {
-        return Vec::new();
-    };
-    match fixed_ipv4_address(server) {
-        Some(host) => vec![Action::OpenSsh { host }],
-        None => vec![Action::Error {
-            msg: format!(
-                "No fixed IPv4 address found for server {}",
-                server_label(server)
-            ),
-            action: Some(Box::new(Action::OpenServerSsh)),
-        }],
-    }
 }
 
 fn server_instance_action_actions(selected: Option<&ServerResponse>) -> Vec<Action> {
@@ -617,96 +580,6 @@ mod tests {
                 stack: true
             }
         ));
-    }
-
-    #[test]
-    fn filter_carry_action_ssh_uses_first_fixed_ipv4_by_network_order() {
-        let server = make_server_with_addresses(
-            "server-1",
-            "test-server",
-            serde_json::json!({
-                "z-net": [
-                    {
-                        "addr": "203.0.113.10",
-                        "OS-EXT-IPS-MAC:mac_addr": "fa:16:3e:00:00:01",
-                        "OS-EXT-IPS:type": "floating",
-                        "version": 4
-                    }
-                ],
-                "a-net": [
-                    {
-                        "addr": "2001:db8::10",
-                        "OS-EXT-IPS-MAC:mac_addr": "fa:16:3e:00:00:02",
-                        "OS-EXT-IPS:type": "fixed",
-                        "version": 6
-                    },
-                    {
-                        "addr": "10.0.0.10",
-                        "OS-EXT-IPS-MAC:mac_addr": "fa:16:3e:00:00:03",
-                        "OS-EXT-IPS:type": "fixed",
-                        "version": 4
-                    }
-                ],
-                "b-net": [
-                    {
-                        "addr": "10.0.0.20",
-                        "OS-EXT-IPS-MAC:mac_addr": "fa:16:3e:00:00:04",
-                        "OS-EXT-IPS:type": "fixed",
-                        "version": 4
-                    }
-                ]
-            }),
-        );
-        let filter = ComputeServerList::default();
-        let result = ComputeServersBehaviour::filter_carry_action(
-            &Action::OpenServerSsh,
-            Some(&server),
-            &filter,
-        );
-        assert_eq!(
-            result,
-            vec![Action::OpenSsh {
-                host: String::from("10.0.0.10")
-            }]
-        );
-    }
-
-    #[test]
-    fn filter_carry_action_ssh_errors_without_fixed_ipv4() {
-        let server = make_server_with_addresses(
-            "server-1",
-            "test-server",
-            serde_json::json!({
-                "private": [
-                    {
-                        "addr": "2001:db8::10",
-                        "OS-EXT-IPS-MAC:mac_addr": "fa:16:3e:00:00:01",
-                        "OS-EXT-IPS:type": "fixed",
-                        "version": 6
-                    },
-                    {
-                        "addr": "not-an-ip",
-                        "OS-EXT-IPS-MAC:mac_addr": "fa:16:3e:00:00:02",
-                        "OS-EXT-IPS:type": "fixed",
-                        "version": 4
-                    },
-                    {
-                        "addr": "203.0.113.10",
-                        "OS-EXT-IPS-MAC:mac_addr": "fa:16:3e:00:00:03",
-                        "OS-EXT-IPS:type": "floating",
-                        "version": 4
-                    }
-                ]
-            }),
-        );
-        let filter = ComputeServerList::default();
-        let result = ComputeServersBehaviour::filter_carry_action(
-            &Action::OpenServerSsh,
-            Some(&server),
-            &filter,
-        );
-        assert_eq!(result.len(), 1);
-        assert!(matches!(result[0], Action::Error { .. }));
     }
 
     #[test]

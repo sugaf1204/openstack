@@ -126,8 +126,6 @@ pub enum Action {
     ShowServerConsoleOutput,
     /// Open noVNC console of the selected server
     OpenServerNoVncConsole,
-    /// Open SSH to the selected server
-    OpenServerSsh,
     /// Show selected server instance actions
     ShowComputeServerInstanceActions,
     /// Show selected server instance action events
@@ -135,8 +133,6 @@ pub enum Action {
 
     /// Open an external URL
     OpenUrl { url: String },
-    /// Open an interactive SSH session
-    OpenSsh { host: String },
 
     // DNS (Designate)
     /// Set DNS Zone filters

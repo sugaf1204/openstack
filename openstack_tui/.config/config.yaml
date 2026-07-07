@@ -50,9 +50,6 @@ mode_keybindings:
     "v":
       action: OpenServerNoVncConsole
       description: noVNC
-    "s":
-      action: OpenServerSsh
-      description: SSH
     "a":
       action: ShowComputeServerInstanceActions
       description: Instance actions

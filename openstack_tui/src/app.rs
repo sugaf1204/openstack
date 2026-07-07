@@ -16,7 +16,6 @@ use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use eyre::Result;
 use ratatui::prelude::{Rect, *};
 use std::collections::HashMap;
-use std::process::Command;
 use tokio::sync::{mpsc, oneshot};
 use tracing::{debug, error, info, instrument};
 
@@ -543,9 +542,6 @@ impl App {
                 Action::OpenUrl { ref url } => {
                     self.open_url(tui, url)?;
                 }
-                Action::OpenSsh { ref host } => {
-                    self.open_ssh(tui, host)?;
-                }
                 Action::Error { .. } => {
                     //if self.mode != Mode::Home {
                     self.active_popup = Some(Popup::Error);
@@ -598,36 +594,6 @@ impl App {
                 msg: format!("Failed to open URL:\n{display_url}\n\n{err:?}"),
                 action: None,
             })?;
-        }
-
-        self.render(tui)?;
-        Ok(())
-    }
-
-    fn open_ssh(&mut self, tui: &mut Tui, host: &str) -> Result<()> {
-        tui.exit()?;
-        let result = Command::new("ssh").arg(host).status();
-        tui.enter()?;
-        tui.terminal.clear()?;
-
-        match result {
-            Ok(status) if status.success() => {}
-            Ok(status) => {
-                self.action_tx.send(Action::Error {
-                    msg: format!("ssh exited with status: {status}"),
-                    action: Some(Box::new(Action::OpenSsh {
-                        host: host.to_string(),
-                    })),
-                })?;
-            }
-            Err(err) => {
-                self.action_tx.send(Action::Error {
-                    msg: format!("Failed to start ssh for {host}:\n\n{err:?}"),
-                    action: Some(Box::new(Action::OpenSsh {
-                        host: host.to_string(),
-                    })),
-                })?;
-            }
         }
 
         self.render(tui)?;
