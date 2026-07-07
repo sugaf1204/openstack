@@ -14,14 +14,17 @@
 
 use crate::action::Action;
 use crate::cloud_worker::compute::v2::{
-    ComputeServerApiRequest, ComputeServerDelete, ComputeServerGetConsoleOutputBuilder,
-    ComputeServerInstanceActionList, ComputeServerList,
+    ComputeServerApiRequest, ComputeServerCreateRemoteConsole, ComputeServerDelete,
+    ComputeServerGetConsoleOutputBuilder, ComputeServerInstanceActionList, ComputeServerList,
 };
 use crate::cloud_worker::types::{ApiRequest, ComputeApiRequest};
 use crate::components::generic_resource_view::GenericResourceView;
 use crate::components::resource_behaviour::ResourceBehaviour;
 use crate::mode::Mode;
-use openstack_types::compute::v2::server::response::list_detailed_21::ServerResponse;
+use openstack_types::compute::v2::server::response::list_detailed_21::{
+    OsExtIpsType, ServerResponse,
+};
+use std::net::Ipv4Addr;
 
 /// Behaviour implementation for ComputeServers.
 pub struct ComputeServersBehaviour;
@@ -80,35 +83,54 @@ impl ResourceBehaviour for ComputeServersBehaviour {
         action: &Action,
         selected: Option<&Self::Item>,
     ) -> Option<(Vec<Action>, ApiRequest)> {
-        if let Action::ShowServerConsoleOutput = action {
-            let server_id = selected?.id.clone();
-            let req = ComputeServerApiRequest::GetConsoleOutput(Box::new(
-                ComputeServerGetConsoleOutputBuilder::default()
-                    .id(server_id)
-                    .os_get_console_output(
-                        crate::cloud_worker::compute::v2::server::get_console_output::OsGetConsoleOutputBuilder::default()
-                            .build()
-                            .ok()?,
-                    )
-                    .build()
-                    .ok()?,
-            ));
-            Some((
-                vec![
-                    Action::SetDescribeLoading(true),
-                    Action::Mode {
-                        mode: Mode::Describe,
-                        stack: true,
+        match action {
+            Action::ShowServerConsoleOutput => {
+                let server_id = selected?.id.clone();
+                let req = ComputeServerApiRequest::GetConsoleOutput(Box::new(
+                    ComputeServerGetConsoleOutputBuilder::default()
+                        .id(server_id)
+                        .os_get_console_output(
+                            crate::cloud_worker::compute::v2::server::get_console_output::OsGetConsoleOutputBuilder::default()
+                                .build()
+                                .ok()?,
+                        )
+                        .build()
+                        .ok()?,
+                ));
+                Some((
+                    vec![
+                        Action::SetDescribeLoading(true),
+                        Action::Mode {
+                            mode: Mode::Describe,
+                            stack: true,
+                        },
+                    ],
+                    ApiRequest::from(req),
+                ))
+            }
+            Action::OpenServerNoVncConsole => {
+                let server = selected?;
+                let req = ComputeServerApiRequest::CreateRemoteConsole(Box::new(
+                    ComputeServerCreateRemoteConsole {
+                        server_id: server.id.clone(),
+                        name: server.name.clone(),
                     },
-                ],
-                ApiRequest::from(req),
-            ))
-        } else {
-            None
+                ));
+                Some((Vec::new(), ApiRequest::from(req)))
+            }
+            _ => None,
         }
     }
     fn matches_singular_request(request: &ApiRequest) -> bool {
-        matches!(request, ApiRequest::Compute(ComputeApiRequest::Server(boxreq)) if matches!(**boxreq, ComputeServerApiRequest::GetConsoleOutput(_)))
+        matches!(
+            request,
+            ApiRequest::Compute(ComputeApiRequest::Server(boxreq))
+            if matches!(
+                **boxreq,
+                ComputeServerApiRequest::GetConsoleOutput(_)
+                    | ComputeServerApiRequest::CreateRemoteConsole(_)
+            )
+        )
     }
     fn handle_singular_response_data(
         request: &ApiRequest,
@@ -121,25 +143,93 @@ impl ResourceBehaviour for ComputeServersBehaviour {
                 data.first().cloned().unwrap_or_default(),
             ));
         }
+        if let ApiRequest::Compute(ComputeApiRequest::Server(boxreq)) = request
+            && let ComputeServerApiRequest::CreateRemoteConsole(_) = &**boxreq
+        {
+            let response = data.first().cloned().unwrap_or_default();
+            if let Some(url) = remote_console_url(&response) {
+                return Some(Action::OpenUrl { url });
+            }
+            return Some(Action::Error {
+                msg: String::from("Remote console response did not include a URL."),
+                action: None,
+            });
+        }
         None
     }
+    fn filter_carry_action(
+        action: &Action,
+        selected: Option<&Self::Item>,
+        _filter: &Self::Filter,
+    ) -> Vec<Action> {
+        match action {
+            Action::OpenServerSsh => server_ssh_actions(selected),
+            Action::ShowComputeServerInstanceActions => server_instance_action_actions(selected),
+            _ => Vec::new(),
+        }
+    }
     fn custom_action(action: &Action, selected: Option<&Self::Item>) -> Vec<Action> {
-        if let Action::ShowComputeServerInstanceActions = action
-            && let Some(sel) = selected
-        {
-            let sel = sel.clone();
-            if let Ok(list) = ComputeServerInstanceActionList::try_from(&sel) {
-                return vec![
-                    Action::SetComputeServerInstanceActionListFilters(Box::new(list)),
-                    Action::Mode {
-                        mode: Mode::ComputeServerInstanceActions,
-                        stack: true,
-                    },
-                ];
-            }
+        if let Action::ShowComputeServerInstanceActions = action {
+            return server_instance_action_actions(selected);
         }
         Vec::new()
     }
+}
+
+fn remote_console_url(data: &serde_json::Value) -> Option<String> {
+    data.get("url")
+        .or_else(|| data.pointer("/remote_console/url"))
+        .and_then(serde_json::Value::as_str)
+        .map(String::from)
+}
+
+fn server_label(server: &ServerResponse) -> String {
+    server.name.clone().unwrap_or_else(|| server.id.clone())
+}
+
+fn fixed_ipv4_address(server: &ServerResponse) -> Option<String> {
+    server
+        .addresses
+        .iter()
+        .flat_map(|(_network, addresses)| addresses.iter())
+        .find(|address| {
+            matches!(&address.os_ext_ips_type, OsExtIpsType::Fixed)
+                && address.version == 4
+                && address.addr.parse::<Ipv4Addr>().is_ok()
+        })
+        .map(|address| address.addr.clone())
+}
+
+fn server_ssh_actions(selected: Option<&ServerResponse>) -> Vec<Action> {
+    let Some(server) = selected else {
+        return Vec::new();
+    };
+    match fixed_ipv4_address(server) {
+        Some(host) => vec![Action::OpenSsh { host }],
+        None => vec![Action::Error {
+            msg: format!(
+                "No fixed IPv4 address found for server {}",
+                server_label(server)
+            ),
+            action: Some(Box::new(Action::OpenServerSsh)),
+        }],
+    }
+}
+
+fn server_instance_action_actions(selected: Option<&ServerResponse>) -> Vec<Action> {
+    let Some(sel) = selected else {
+        return Vec::new();
+    };
+    if let Ok(list) = ComputeServerInstanceActionList::try_from(sel) {
+        return vec![
+            Action::SetComputeServerInstanceActionListFilters(Box::new(list)),
+            Action::Mode {
+                mode: Mode::ComputeServerInstanceActions,
+                stack: true,
+            },
+        ];
+    }
+    Vec::new()
 }
 
 /// Public component for ComputeServers using the generic view.
@@ -153,6 +243,14 @@ mod tests {
     use openstack_types::compute::v2::server::response::list_detailed_21::ServerResponse;
 
     fn make_server(id: &str, name: &str) -> ServerResponse {
+        make_server_with_addresses(id, name, serde_json::json!({}))
+    }
+
+    fn make_server_with_addresses(
+        id: &str,
+        name: &str,
+        addresses: serde_json::Value,
+    ) -> ServerResponse {
         serde_json::from_value(serde_json::json!({
             "id": id,
             "name": name,
@@ -170,7 +268,7 @@ mod tests {
             "OS-EXT-STS:power_state": 1,
             "os-extended-volumes:volumes_attached": [],
             "metadata": {},
-            "addresses": {},
+            "addresses": addresses,
             "config_drive": "",
             "hostId": "host1",
             "key_name": null,
@@ -316,6 +414,37 @@ mod tests {
     }
 
     #[test]
+    fn action_to_singular_request_no_vnc_with_server() {
+        let server = make_server("server-1", "test-server");
+        let result = ComputeServersBehaviour::action_to_singular_request(
+            &Action::OpenServerNoVncConsole,
+            Some(&server),
+        );
+        assert!(result.is_some());
+        let (actions, request) = result.unwrap();
+        assert!(actions.is_empty());
+        match request {
+            ApiRequest::Compute(ComputeApiRequest::Server(boxreq)) => match *boxreq {
+                ComputeServerApiRequest::CreateRemoteConsole(req) => {
+                    assert_eq!(req.server_id, "server-1");
+                    assert_eq!(req.name, Some(String::from("test-server")));
+                }
+                _ => panic!("unexpected request"),
+            },
+            _ => panic!("unexpected request"),
+        }
+    }
+
+    #[test]
+    fn action_to_singular_request_no_vnc_without_server() {
+        let result = ComputeServersBehaviour::action_to_singular_request(
+            &Action::OpenServerNoVncConsole,
+            None,
+        );
+        assert!(result.is_none());
+    }
+
+    #[test]
     fn action_to_singular_request_returns_none_for_unrelated_action() {
         let server = make_server("server-1", "test-server");
         let result =
@@ -328,6 +457,17 @@ mod tests {
         let server = make_server("server-1", "test-server");
         let result = ComputeServersBehaviour::action_to_singular_request(
             &Action::ShowServerConsoleOutput,
+            Some(&server),
+        );
+        let (_actions, request) = result.unwrap();
+        assert!(ComputeServersBehaviour::matches_singular_request(&request));
+    }
+
+    #[test]
+    fn matches_singular_request_returns_true_for_no_vnc() {
+        let server = make_server("server-1", "test-server");
+        let result = ComputeServersBehaviour::action_to_singular_request(
+            &Action::OpenServerNoVncConsole,
             Some(&server),
         );
         let (_actions, request) = result.unwrap();
@@ -355,6 +495,68 @@ mod tests {
             action,
             Some(Action::SetDescribeApiResponseData(_))
         ));
+    }
+
+    #[test]
+    fn handle_singular_response_data_opens_no_vnc_url() {
+        let server = make_server("server-1", "test-server");
+        let result = ComputeServersBehaviour::action_to_singular_request(
+            &Action::OpenServerNoVncConsole,
+            Some(&server),
+        );
+        let (_actions, request) = result.unwrap();
+        let data = vec![serde_json::json!({ "url": "https://console.example/novnc" })];
+        let action = ComputeServersBehaviour::handle_singular_response_data(&request, &data);
+        assert_eq!(
+            action,
+            Some(Action::OpenUrl {
+                url: String::from("https://console.example/novnc")
+            })
+        );
+    }
+
+    #[test]
+    fn handle_singular_response_data_opens_nested_no_vnc_url() {
+        let server = make_server("server-1", "test-server");
+        let result = ComputeServersBehaviour::action_to_singular_request(
+            &Action::OpenServerNoVncConsole,
+            Some(&server),
+        );
+        let (_actions, request) = result.unwrap();
+        let data = vec![serde_json::json!({
+            "remote_console": { "url": "https://console.example/novnc" }
+        })];
+        let action = ComputeServersBehaviour::handle_singular_response_data(&request, &data);
+        assert_eq!(
+            action,
+            Some(Action::OpenUrl {
+                url: String::from("https://console.example/novnc")
+            })
+        );
+    }
+
+    #[test]
+    fn handle_singular_response_data_errors_without_no_vnc_url() {
+        let server = make_server("server-1", "test-server");
+        let result = ComputeServersBehaviour::action_to_singular_request(
+            &Action::OpenServerNoVncConsole,
+            Some(&server),
+        );
+        let (_actions, request) = result.unwrap();
+        let data = vec![serde_json::json!({
+            "protocol": "vnc",
+            "type": "novnc",
+            "token": "secret-console-token"
+        })];
+        let action = ComputeServersBehaviour::handle_singular_response_data(&request, &data);
+        match action {
+            Some(Action::Error { msg, action }) => {
+                assert_eq!(msg, "Remote console response did not include a URL.");
+                assert!(action.is_none());
+                assert!(!msg.contains("secret-console-token"));
+            }
+            _ => panic!("expected remote console error"),
+        }
     }
 
     #[test]
@@ -392,6 +594,119 @@ mod tests {
         let result =
             ComputeServersBehaviour::custom_action(&Action::ShowComputeServerInstanceActions, None);
         assert!(result.is_empty());
+    }
+
+    #[test]
+    fn filter_carry_action_instance_actions_with_server() {
+        let server = make_server("server-1", "test-server");
+        let filter = ComputeServerList::default();
+        let result = ComputeServersBehaviour::filter_carry_action(
+            &Action::ShowComputeServerInstanceActions,
+            Some(&server),
+            &filter,
+        );
+        assert_eq!(result.len(), 2);
+        assert!(matches!(
+            result[0],
+            Action::SetComputeServerInstanceActionListFilters(_)
+        ));
+        assert!(matches!(
+            result[1],
+            Action::Mode {
+                mode: Mode::ComputeServerInstanceActions,
+                stack: true
+            }
+        ));
+    }
+
+    #[test]
+    fn filter_carry_action_ssh_uses_first_fixed_ipv4_by_network_order() {
+        let server = make_server_with_addresses(
+            "server-1",
+            "test-server",
+            serde_json::json!({
+                "z-net": [
+                    {
+                        "addr": "203.0.113.10",
+                        "OS-EXT-IPS-MAC:mac_addr": "fa:16:3e:00:00:01",
+                        "OS-EXT-IPS:type": "floating",
+                        "version": 4
+                    }
+                ],
+                "a-net": [
+                    {
+                        "addr": "2001:db8::10",
+                        "OS-EXT-IPS-MAC:mac_addr": "fa:16:3e:00:00:02",
+                        "OS-EXT-IPS:type": "fixed",
+                        "version": 6
+                    },
+                    {
+                        "addr": "10.0.0.10",
+                        "OS-EXT-IPS-MAC:mac_addr": "fa:16:3e:00:00:03",
+                        "OS-EXT-IPS:type": "fixed",
+                        "version": 4
+                    }
+                ],
+                "b-net": [
+                    {
+                        "addr": "10.0.0.20",
+                        "OS-EXT-IPS-MAC:mac_addr": "fa:16:3e:00:00:04",
+                        "OS-EXT-IPS:type": "fixed",
+                        "version": 4
+                    }
+                ]
+            }),
+        );
+        let filter = ComputeServerList::default();
+        let result = ComputeServersBehaviour::filter_carry_action(
+            &Action::OpenServerSsh,
+            Some(&server),
+            &filter,
+        );
+        assert_eq!(
+            result,
+            vec![Action::OpenSsh {
+                host: String::from("10.0.0.10")
+            }]
+        );
+    }
+
+    #[test]
+    fn filter_carry_action_ssh_errors_without_fixed_ipv4() {
+        let server = make_server_with_addresses(
+            "server-1",
+            "test-server",
+            serde_json::json!({
+                "private": [
+                    {
+                        "addr": "2001:db8::10",
+                        "OS-EXT-IPS-MAC:mac_addr": "fa:16:3e:00:00:01",
+                        "OS-EXT-IPS:type": "fixed",
+                        "version": 6
+                    },
+                    {
+                        "addr": "not-an-ip",
+                        "OS-EXT-IPS-MAC:mac_addr": "fa:16:3e:00:00:02",
+                        "OS-EXT-IPS:type": "fixed",
+                        "version": 4
+                    },
+                    {
+                        "addr": "203.0.113.10",
+                        "OS-EXT-IPS-MAC:mac_addr": "fa:16:3e:00:00:03",
+                        "OS-EXT-IPS:type": "floating",
+                        "version": 4
+                    }
+                ]
+            }),
+        );
+        let filter = ComputeServerList::default();
+        let result = ComputeServersBehaviour::filter_carry_action(
+            &Action::OpenServerSsh,
+            Some(&server),
+            &filter,
+        );
+        assert_eq!(result.len(), 1);
+        assert!(matches!(result[0], Action::Error { .. }));
     }
 
     #[test]
