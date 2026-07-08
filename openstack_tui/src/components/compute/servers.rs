@@ -21,7 +21,9 @@ use crate::cloud_worker::types::{ApiRequest, ComputeApiRequest};
 use crate::components::generic_resource_view::GenericResourceView;
 use crate::components::resource_behaviour::ResourceBehaviour;
 use crate::mode::Mode;
-use openstack_types::compute::v2::server::response::list_detailed_21::ServerResponse;
+use openstack_types::compute::v2::server::response::list_detailed_21::{
+    OsExtIpsType, ServerResponse,
+};
 
 /// Behaviour implementation for ComputeServers.
 pub struct ComputeServersBehaviour;
@@ -161,6 +163,7 @@ impl ResourceBehaviour for ComputeServersBehaviour {
     ) -> Vec<Action> {
         match action {
             Action::ShowComputeServerInstanceActions => server_instance_action_actions(selected),
+            Action::SshComputeServer => ssh_compute_server_actions(selected),
             _ => Vec::new(),
         }
     }
@@ -177,6 +180,37 @@ fn remote_console_url(data: &serde_json::Value) -> Option<String> {
         .or_else(|| data.pointer("/remote_console/url"))
         .and_then(serde_json::Value::as_str)
         .map(String::from)
+}
+
+fn fixed_ip_address(server: &ServerResponse) -> Option<String> {
+    server
+        .addresses
+        .values()
+        .flat_map(|addresses| addresses.iter())
+        .find(|address| matches!(&address.os_ext_ips_type, OsExtIpsType::Fixed))
+        .map(|address| address.addr.clone())
+}
+
+fn ssh_compute_server_actions(selected: Option<&ServerResponse>) -> Vec<Action> {
+    let Some(server) = selected else {
+        return vec![Action::Error {
+            msg: String::from("No server selected."),
+            action: None,
+        }];
+    };
+
+    let Some(fixed_ip) = fixed_ip_address(server) else {
+        let server_name = server.name.as_deref().unwrap_or(server.id.as_str());
+        return vec![Action::Error {
+            msg: format!("Server `{server_name}` does not have a fixed IP address."),
+            action: None,
+        }];
+    };
+
+    vec![Action::RunTerminalCommand {
+        program: String::from("ssh"),
+        args: vec![fixed_ip],
+    }]
 }
 
 fn server_instance_action_actions(selected: Option<&ServerResponse>) -> Vec<Action> {
@@ -529,6 +563,121 @@ mod tests {
         let data = vec![serde_json::json!({ "output": "test" })];
         let action = ComputeServersBehaviour::handle_singular_response_data(&request, &data);
         assert!(action.is_none());
+    }
+
+    #[test]
+    fn fixed_ip_address_returns_fixed_address() {
+        let server = make_server_with_addresses(
+            "server-1",
+            "test-server",
+            serde_json::json!({
+                "private": [
+                    {
+                        "addr": "203.0.113.10",
+                        "OS-EXT-IPS-MAC:mac_addr": "fa:16:3e:00:00:01",
+                        "OS-EXT-IPS:type": "floating",
+                        "version": 4
+                    },
+                    {
+                        "addr": "10.0.0.5",
+                        "OS-EXT-IPS-MAC:mac_addr": "fa:16:3e:00:00:02",
+                        "OS-EXT-IPS:type": "fixed",
+                        "version": 4
+                    }
+                ]
+            }),
+        );
+
+        assert_eq!(fixed_ip_address(&server), Some(String::from("10.0.0.5")));
+    }
+
+    #[test]
+    fn fixed_ip_address_ignores_floating_addresses() {
+        let server = make_server_with_addresses(
+            "server-1",
+            "test-server",
+            serde_json::json!({
+                "private": [
+                    {
+                        "addr": "203.0.113.10",
+                        "OS-EXT-IPS-MAC:mac_addr": "fa:16:3e:00:00:01",
+                        "OS-EXT-IPS:type": "floating",
+                        "version": 4
+                    }
+                ]
+            }),
+        );
+
+        assert_eq!(fixed_ip_address(&server), None);
+    }
+
+    #[test]
+    fn filter_carry_action_ssh_runs_ssh_to_fixed_ip() {
+        let server = make_server_with_addresses(
+            "server-1",
+            "test-server",
+            serde_json::json!({
+                "private": [
+                    {
+                        "addr": "10.0.0.5",
+                        "OS-EXT-IPS-MAC:mac_addr": "fa:16:3e:00:00:02",
+                        "OS-EXT-IPS:type": "fixed",
+                        "version": 4
+                    }
+                ]
+            }),
+        );
+        let filter = ComputeServerList::default();
+        let result = ComputeServersBehaviour::filter_carry_action(
+            &Action::SshComputeServer,
+            Some(&server),
+            &filter,
+        );
+
+        assert_eq!(
+            result,
+            vec![Action::RunTerminalCommand {
+                program: String::from("ssh"),
+                args: vec![String::from("10.0.0.5")]
+            }]
+        );
+    }
+
+    #[test]
+    fn filter_carry_action_ssh_errors_without_fixed_ip() {
+        let server = make_server("server-1", "test-server");
+        let filter = ComputeServerList::default();
+        let result = ComputeServersBehaviour::filter_carry_action(
+            &Action::SshComputeServer,
+            Some(&server),
+            &filter,
+        );
+
+        match result.as_slice() {
+            [Action::Error { msg, action }] => {
+                assert_eq!(
+                    msg,
+                    "Server `test-server` does not have a fixed IP address."
+                );
+                assert!(action.is_none());
+            }
+            _ => panic!("expected fixed IP error"),
+        }
+    }
+
+    #[test]
+    fn filter_carry_action_ssh_errors_without_selection() {
+        let filter = ComputeServerList::default();
+        let result =
+            ComputeServersBehaviour::filter_carry_action(&Action::SshComputeServer, None, &filter);
+
+        match result.as_slice() {
+            [Action::Error { msg, action }] => {
+                assert_eq!(msg, "No server selected.");
+                assert!(action.is_none());
+            }
+            _ => panic!("expected selection error"),
+        }
     }
 
     #[test]

@@ -3494,6 +3494,7 @@ dependencies = [
  "futures",
  "itertools 0.15.0",
  "lazy_static",
+ "libc",
  "open",
  "openstack_sdk",
  "openstack_types",

@@ -33,6 +33,7 @@ eyre = { workspace = true }
 futures = { workspace = true }
 itertools = { workspace = true }
 lazy_static = "^1.5"
+libc = "0.2"
 open.workspace = true
 openstack_sdk = { path = "../openstack_sdk", version = "^0.22", default-features = false, features = ["async", "block_storage", "compute", "dns", "identity", "image", "load_balancer", "network"] }
 openstack_types = { path = "../openstack_types", version = "^0.22" }

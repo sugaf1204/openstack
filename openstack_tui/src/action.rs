@@ -126,13 +126,22 @@ pub enum Action {
     ShowServerConsoleOutput,
     /// Open noVNC console of the selected server
     OpenServerNoVncConsole,
+    /// SSH to the fixed IP of the selected server
+    SshComputeServer,
     /// Show selected server instance actions
     ShowComputeServerInstanceActions,
     /// Show selected server instance action events
     ShowComputeServerInstanceActionEvents,
 
     /// Open an external URL
-    OpenUrl { url: String },
+    OpenUrl {
+        url: String,
+    },
+    /// Run an external command in the current terminal
+    RunTerminalCommand {
+        program: String,
+        args: Vec<String>,
+    },
 
     // DNS (Designate)
     /// Set DNS Zone filters

@@ -15,7 +15,13 @@
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use eyre::Result;
 use ratatui::prelude::{Rect, *};
-use std::collections::HashMap;
+#[cfg(unix)]
+use std::os::unix::process::CommandExt;
+use std::{
+    collections::HashMap,
+    io,
+    process::{Command, ExitStatus},
+};
 use tokio::sync::{mpsc, oneshot};
 use tracing::{debug, error, info, instrument};
 
@@ -542,6 +548,12 @@ impl App {
                 Action::OpenUrl { ref url } => {
                     self.open_url(tui, url)?;
                 }
+                Action::RunTerminalCommand {
+                    ref program,
+                    ref args,
+                } => {
+                    self.run_terminal_command(tui, program, args)?;
+                }
                 Action::Error { .. } => {
                     //if self.mode != Mode::Home {
                     self.active_popup = Some(Popup::Error);
@@ -579,6 +591,31 @@ impl App {
             }
             self.render(tui)?;
         }
+        Ok(())
+    }
+
+    fn run_terminal_command(
+        &mut self,
+        tui: &mut Tui,
+        program: &str,
+        args: &[String],
+    ) -> Result<()> {
+        tui.exit()?;
+        let result = run_terminal_command_status(program, args);
+        tui.enter()?;
+        tui.terminal.clear()?;
+
+        if let Err(err) = result {
+            self.action_tx.send(Action::Error {
+                msg: format!(
+                    "Failed to run terminal command `{}`:\n\n{err}",
+                    terminal_command_for_display(program, args)
+                ),
+                action: None,
+            })?;
+        }
+
+        self.render(tui)?;
         Ok(())
     }
 
@@ -655,6 +692,102 @@ impl App {
     }
 }
 
+fn run_terminal_command_status(program: &str, args: &[String]) -> io::Result<ExitStatus> {
+    let mut command = Command::new(program);
+    command.args(args);
+
+    #[cfg(unix)]
+    let _signal_guard = {
+        let guard = TerminalCommandSignalGuard::new()?;
+        unsafe {
+            command.pre_exec(restore_default_terminal_command_signals);
+        }
+        guard
+    };
+
+    command.status()
+}
+
+#[cfg(unix)]
+struct TerminalCommandSignalGuard {
+    previous_actions: Vec<(libc::c_int, libc::sigaction)>,
+}
+
+#[cfg(unix)]
+impl TerminalCommandSignalGuard {
+    fn new() -> io::Result<Self> {
+        let mut previous_actions = Vec::new();
+        for signal in [libc::SIGINT, libc::SIGQUIT] {
+            match set_signal_handler(signal, libc::SIG_IGN) {
+                Ok(previous_action) => previous_actions.push((signal, previous_action)),
+                Err(err) => {
+                    restore_signal_actions(&previous_actions);
+                    return Err(err);
+                }
+            }
+        }
+
+        Ok(Self { previous_actions })
+    }
+}
+
+#[cfg(unix)]
+impl Drop for TerminalCommandSignalGuard {
+    fn drop(&mut self) {
+        restore_signal_actions(&self.previous_actions);
+    }
+}
+
+#[cfg(unix)]
+fn restore_default_terminal_command_signals() -> io::Result<()> {
+    set_signal_handler(libc::SIGINT, libc::SIG_DFL)?;
+    set_signal_handler(libc::SIGQUIT, libc::SIG_DFL)?;
+    Ok(())
+}
+
+#[cfg(unix)]
+fn restore_signal_actions(actions: &[(libc::c_int, libc::sigaction)]) {
+    for (signal, action) in actions.iter().rev() {
+        let _ = set_signal_action(*signal, action);
+    }
+}
+
+#[cfg(unix)]
+fn set_signal_handler(
+    signal: libc::c_int,
+    handler: libc::sighandler_t,
+) -> io::Result<libc::sigaction> {
+    let mut action = empty_signal_action();
+    action.sa_sigaction = handler as _;
+    set_signal_action(signal, &action)
+}
+
+#[cfg(unix)]
+fn set_signal_action(signal: libc::c_int, action: &libc::sigaction) -> io::Result<libc::sigaction> {
+    let mut previous_action = empty_signal_action();
+    if unsafe { libc::sigaction(signal, action, &mut previous_action) } == 0 {
+        Ok(previous_action)
+    } else {
+        Err(io::Error::last_os_error())
+    }
+}
+
+#[cfg(unix)]
+fn empty_signal_action() -> libc::sigaction {
+    let mut action = unsafe { std::mem::zeroed::<libc::sigaction>() };
+    unsafe {
+        libc::sigemptyset(&mut action.sa_mask);
+    }
+    action
+}
+
+fn terminal_command_for_display(program: &str, args: &[String]) -> String {
+    std::iter::once(program.to_string())
+        .chain(args.iter().map(|arg| arg.to_string()))
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
 fn sanitize_url_for_error(url: &str) -> String {
     let Ok(mut parsed) = url::Url::parse(url) else {
         return String::from("<redacted URL>");
@@ -701,5 +834,12 @@ mod tests {
         let result = sanitize_url_for_error("not a url with token=secret");
 
         assert_eq!(result, "<redacted URL>");
+    }
+
+    #[test]
+    fn terminal_command_for_display_joins_program_and_args() {
+        let args = vec![String::from("10.0.0.5")];
+
+        assert_eq!(terminal_command_for_display("ssh", &args), "ssh 10.0.0.5");
     }
 }
