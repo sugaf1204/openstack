@@ -71,6 +71,7 @@ use crate::{
         project_select_popup::ProjectSelect,
         region_select_popup::RegionSelect,
         resource_select_popup::ApiRequestSelect,
+        ssh_user_popup::SshUserPopup,
     },
     config::Config,
     error::TuiError,
@@ -87,6 +88,7 @@ enum Popup {
     SwitchCloud,
     SwitchProject,
     SwitchRegion,
+    SshUser,
     //CreateNetworkSecurityGroupRule,
     Confirm,
 }
@@ -212,6 +214,7 @@ impl App {
         popups.insert(Popup::Error, Box::new(ErrorPopup::new()));
         popups.insert(Popup::SwitchCloud, Box::new(CloudSelect::new()));
         popups.insert(Popup::SelectApiRequest, Box::new(ApiRequestSelect::new()));
+        popups.insert(Popup::SshUser, Box::new(SshUserPopup::new()));
         popups.insert(
             Popup::AuthHelper,
             Box::new(AuthHelper::new(auth_helper_control_channel_rx)),
@@ -548,10 +551,15 @@ impl App {
                 Action::OpenUrl { ref url } => {
                     self.open_url(tui, url)?;
                 }
+                Action::PromptSshUser { .. } => {
+                    self.active_popup = Some(Popup::SshUser);
+                    self.render(tui)?;
+                }
                 Action::RunTerminalCommand {
                     ref program,
                     ref args,
                 } => {
+                    self.active_popup = None;
                     self.run_terminal_command(tui, program, args)?;
                 }
                 Action::Error { .. } => {

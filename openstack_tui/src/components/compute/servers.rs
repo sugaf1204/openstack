@@ -207,10 +207,7 @@ fn ssh_compute_server_actions(selected: Option<&ServerResponse>) -> Vec<Action> 
         }];
     };
 
-    vec![Action::RunTerminalCommand {
-        program: String::from("ssh"),
-        args: vec![fixed_ip],
-    }]
+    vec![Action::PromptSshUser { host: fixed_ip }]
 }
 
 fn server_instance_action_actions(selected: Option<&ServerResponse>) -> Vec<Action> {
@@ -612,7 +609,7 @@ mod tests {
     }
 
     #[test]
-    fn filter_carry_action_ssh_runs_ssh_to_fixed_ip() {
+    fn filter_carry_action_ssh_prompts_for_user_with_fixed_ip() {
         let server = make_server_with_addresses(
             "server-1",
             "test-server",
@@ -636,9 +633,8 @@ mod tests {
 
         assert_eq!(
             result,
-            vec![Action::RunTerminalCommand {
-                program: String::from("ssh"),
-                args: vec![String::from("10.0.0.5")]
+            vec![Action::PromptSshUser {
+                host: String::from("10.0.0.5")
             }]
         );
     }

@@ -45,6 +45,7 @@ pub mod resource_behaviour;
 mod resource_key_impls; // bring ResourceKey impls into scope
 pub mod resource_select_popup;
 pub mod resource_table;
+pub mod ssh_user_popup;
 pub mod table_view;
 // pub mod modal; // removed – replaced by generic Popup widget
 pub use crate::widgets::fuzzy_select::{FuzzySelect, FuzzySelectState};

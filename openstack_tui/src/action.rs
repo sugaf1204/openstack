@@ -137,6 +137,10 @@ pub enum Action {
     OpenUrl {
         url: String,
     },
+    /// Ask for the SSH user before connecting to a host
+    PromptSshUser {
+        host: String,
+    },
     /// Run an external command in the current terminal
     RunTerminalCommand {
         program: String,
