@@ -207,13 +207,7 @@ impl Component for AuthHelper {
         let input = Paragraph::new(
             self.input
                 .as_deref()
-                .map(|v| {
-                    if self.is_sensitive {
-                        mask_sensitive_input(v)
-                    } else {
-                        v.to_string()
-                    }
-                })
+                .map(|v| display_auth_input(v, self.is_sensitive))
                 .unwrap_or_default(),
         )
         .block(input_block);
@@ -240,29 +234,34 @@ impl Component for AuthHelper {
     }
 }
 
-/// Mask non-empty sensitive input without revealing its length.
-fn mask_sensitive_input(input: &str) -> String {
-    if input.is_empty() {
+/// Hide sensitive input while keeping non-sensitive input visible.
+fn display_auth_input(input: &str, is_sensitive: bool) -> String {
+    if is_sensitive {
         String::new()
     } else {
-        String::from("********")
+        input.to_string()
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use super::mask_sensitive_input;
+    use super::display_auth_input;
 
     #[test]
-    fn mask_sensitive_input_uses_a_fixed_length_mask() {
-        for (input, expected) in [
-            ("", ""),
-            ("a", "********"),
-            ("password", "********"),
-            ("a much longer password", "********"),
-            ("pass\u{1F512}", "********"),
+    fn sensitive_input_is_never_displayed() {
+        for input in [
+            "",
+            "a",
+            "password",
+            "a much longer password",
+            "pass\u{1F512}",
         ] {
-            assert_eq!(mask_sensitive_input(input), expected);
+            assert_eq!(display_auth_input(input, true), "");
         }
+    }
+
+    #[test]
+    fn non_sensitive_input_remains_visible() {
+        assert_eq!(display_auth_input("visible input", false), "visible input");
     }
 }
