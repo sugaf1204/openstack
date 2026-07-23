@@ -240,9 +240,13 @@ impl Component for AuthHelper {
     }
 }
 
-/// Mask every character in sensitive input.
+/// Mask non-empty sensitive input without revealing its length.
 fn mask_sensitive_input(input: &str) -> String {
-    "*".repeat(input.chars().count())
+    if input.is_empty() {
+        String::new()
+    } else {
+        String::from("********")
+    }
 }
 
 #[cfg(test)]
@@ -250,12 +254,13 @@ mod tests {
     use super::mask_sensitive_input;
 
     #[test]
-    fn mask_sensitive_input_masks_every_character() {
+    fn mask_sensitive_input_uses_a_fixed_length_mask() {
         for (input, expected) in [
             ("", ""),
-            ("a", "*"),
+            ("a", "********"),
             ("password", "********"),
-            ("pass\u{1F512}", "*****"),
+            ("a much longer password", "********"),
+            ("pass\u{1F512}", "********"),
         ] {
             assert_eq!(mask_sensitive_input(input), expected);
         }
