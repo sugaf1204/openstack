@@ -206,12 +206,12 @@ impl Component for AuthHelper {
         ));
         let input = Paragraph::new(
             self.input
-                .clone()
+                .as_deref()
                 .map(|v| {
                     if self.is_sensitive {
-                        mask_string_except_last(v)
+                        mask_sensitive_input(v)
                     } else {
-                        v
+                        v.to_string()
                     }
                 })
                 .unwrap_or_default(),
@@ -240,24 +240,24 @@ impl Component for AuthHelper {
     }
 }
 
-/// Mask the string only keeping the last character visible
-fn mask_string_except_last(s: String) -> String {
-    let len = s.chars().count();
-    if len == 0 {
-        return String::new();
+/// Mask every character in sensitive input.
+fn mask_sensitive_input(input: &str) -> String {
+    "*".repeat(input.chars().count())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::mask_sensitive_input;
+
+    #[test]
+    fn mask_sensitive_input_masks_every_character() {
+        for (input, expected) in [
+            ("", ""),
+            ("a", "*"),
+            ("password", "********"),
+            ("pass\u{1F512}", "*****"),
+        ] {
+            assert_eq!(mask_sensitive_input(input), expected);
+        }
     }
-
-    let mut masked_string = String::new();
-
-    // Mask all characters except the last one
-    for _ in s.chars().take(len - 1) {
-        masked_string.push('*');
-    }
-
-    // Append the last character
-    if let Some(last_char) = s.chars().last() {
-        masked_string.push(last_char);
-    }
-
-    masked_string
 }
