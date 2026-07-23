@@ -119,19 +119,28 @@ impl Cloud {
         &mut self,
         scope: &AuthTokenScope,
     ) -> Result<Option<AuthResponse>, Report> {
-        if self.cloud.is_none() {
-            return Err(eyre!("Cannot change scope without being connected first"));
-        }
+        let current_session = self
+            .cloud
+            .as_ref()
+            .ok_or_else(|| eyre!("Cannot change scope without being connected first"))?;
         let cloud_name = self
             .cloud_name
             .clone()
             .ok_or_else(|| eyre!("Cannot change scope without a selected cloud"))?;
-        let current_region = self.cloud.as_ref().and_then(AsyncOpenStack::get_region_name);
+        let current_region = current_session.get_region_name();
+        let current_token = current_session
+            .get_auth_token()
+            .ok_or_else(|| eyre!("Cannot change scope without an authentication token"))?;
         let profile = self
             .cloud_configs
             .get_cloud_config(cloud_name.clone())?
-            .ok_or_else(|| eyre!("Cloud `{}` is not present in configuration files", cloud_name))?;
-        let scoped_profile = profile_scoped_to(profile, scope);
+            .ok_or_else(|| {
+                eyre!(
+                    "Cloud `{}` is not present in configuration files",
+                    cloud_name
+                )
+            })?;
+        let scoped_profile = profile_scoped_to_with_token(profile, scope, current_token);
 
         debug!("Switching connection scope to {:?}", scope);
         let session = self.connect_profile(&scoped_profile, true).await?;
@@ -309,6 +318,19 @@ fn profile_scoped_to(mut profile: CloudConfig, scope: &AuthTokenScope) -> CloudC
     profile
 }
 
+fn profile_scoped_to_with_token(
+    profile: CloudConfig,
+    scope: &AuthTokenScope,
+    token: SecretString,
+) -> CloudConfig {
+    let mut profile = profile_scoped_to(profile, scope);
+    let auth = profile.auth.get_or_insert_with(Default::default);
+    auth.token = Some(token);
+    auth.password = None;
+    profile.auth_type = Some(String::from("v3token"));
+    profile
+}
+
 #[derive(Clone)]
 struct TuiAuthHelper {
     app_tx: Option<UnboundedSender<Action>>,
@@ -435,10 +457,12 @@ mod tests {
     use super::*;
     use openstack_sdk::config::Auth;
     use openstack_sdk::types::identity::v3::{Domain, Project};
+    use secrecy::ExposeSecret;
 
     fn profile_with_existing_scope() -> CloudConfig {
         CloudConfig {
             auth: Some(Auth {
+                password: Some(SecretString::from("stored-password")),
                 project_id: Some(String::from("old-project-id")),
                 project_name: Some(String::from("old-project-name")),
                 project_domain_id: Some(String::from("old-domain-id")),
@@ -497,6 +521,29 @@ mod tests {
         assert_eq!(auth.project_name.as_deref(), Some("new-project-name"));
         assert_eq!(auth.project_domain_id.as_deref(), Some("new-domain-id"));
         assert_eq!(auth.project_domain_name, None);
+        assert_eq!(profile.auth_cache, Some(false));
+    }
+
+    #[test]
+    fn profile_scoped_to_with_token_does_not_retain_password() {
+        let profile = profile_scoped_to_with_token(
+            profile_with_existing_scope(),
+            &AuthTokenScope::Project(Project {
+                id: Some(String::from("new-project-id")),
+                name: None,
+                domain: None,
+            }),
+            SecretString::from("current-token"),
+        );
+        let auth = profile.auth.unwrap();
+
+        assert_eq!(profile.auth_type.as_deref(), Some("v3token"));
+        assert_eq!(
+            auth.token.as_ref().map(ExposeSecret::expose_secret),
+            Some("current-token")
+        );
+        assert!(auth.password.is_none());
+        assert_eq!(auth.project_id.as_deref(), Some("new-project-id"));
         assert_eq!(profile.auth_cache, Some(false));
     }
 }
